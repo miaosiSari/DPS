@@ -16,8 +16,8 @@
 
 For example, "CUDA_VISIBLE_DEVICES=0,1 python3 main.py in out middle" means you are goint to use GPU 0, 1 to do super-resolution(2x) task. The input images are in the folder "in" and the output images will be in the folder "out". If the output folder does not exist, the program would use os.mkdir to create an empty one.
 
-<img src="image/demo.gif" width="400px"/> 
-<img src="image/demo2.gif" width="400px"/>
+<img src="image/demo.gif" width="720px" height="1080px"/> 
+<img src="image/demo2.gif" width="720px" height="1080px"/>
 requirements:
 
 python3
