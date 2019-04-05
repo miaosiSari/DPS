@@ -305,9 +305,10 @@ def preprocessing(prefix_dirty = 'SRA/', prefix_sharp = 'SRB/', prefix_half='tra
 
 
 batchcursor = 0
-with open('info.json') as f:
-     d = list(json.load(f))
-random.shuffle(d)
+if mode == 'train':
+     with open('info.json') as f:
+          d = list(json.load(f))
+     random.shuffle(d)
 initial_globalstep = 0
 globalstep = tf.Variable(initial_globalstep, trainable=False)
 blurred = tf.placeholder(tf.float32, [None, None, None, 3])
@@ -390,6 +391,8 @@ def test(sess, input_file_root, input_files, output_root, print_file=False, run_
             print(image_path)
         image = Image.open(image_path)
         w, h= image.size
+        origw = w
+        origh = h
         if h%4 <= 2:
             h -= h%4
         else:
@@ -398,14 +401,13 @@ def test(sess, input_file_root, input_files, output_root, print_file=False, run_
             w -= w%4
         else:
             w += 4-w%4
-        neww, newh = w*4, h*4
         if (w, h) != image.size:
             image = image.resize((w, h), Image.BICUBIC) 
         image = np.array(image).astype(np.float32)
         image = image[np.newaxis, :]
         image /= 255.0
         print(image.shape)
-        if run_all:
+        if run_all or mode == 'all':
             sharp_img, scale2_img, final_img = sess.run([sharp, scale2, final], feed_dict={blurred:image})
             sharp_img = tensor_to_img(sharp_img[0])
             scale2_img = tensor_to_img(scale2_img[0])
@@ -414,16 +416,19 @@ def test(sess, input_file_root, input_files, output_root, print_file=False, run_
             scale2_img.save(output_root+'/scale2_'+temp)
             final_img.save(output_root+'/final_'+temp)
         elif mode=='final':
+            neww, newh = origw*4, origh*4
             final_img = sess.run(final, feed_dict={blurred:image})
             final_img = tensor_to_img_reshape(final_img[0], (neww, newh))
             final_img.save(output_root+'/final_'+temp)
         elif mode == 'deblur':
+            neww, newh = origw, origh
             sharp_img = sess.run(sharp, feed_dict={blurred:image})
-            sharp_img = tensor_to_img_reshape(sharp_img[0], (w, h))
+            sharp_img = tensor_to_img_reshape(sharp_img[0], (neww, newh))
             sharp_img.save(output_root+'/sharp_'+temp)
         elif mode == 'middle':
+            neww, newh = origw*2, origh*2
             middle_img = sess.run(scale2, feed_dict={blurred:image})
-            middle_img = tensor_to_img_reshape(middle_img[0], (w, h))
+            middle_img = tensor_to_img_reshape(middle_img[0], (neww, newh))
             middle_img.save(output_root+'/middle_'+temp)
 
     end_time = time.time()
@@ -453,7 +458,7 @@ with tf.Session() as sess:
             pass
         if mode == 'test':
             try:
-                 mode = sys.argv[2]
+                 mode = sys.argv[3]
             except:
                  mode = 'final'
             testall(sess, sys.argv[1], sys.argv[2], print_file=True, run_all=False, mode=mode)
