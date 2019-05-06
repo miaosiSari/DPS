@@ -1,6 +1,6 @@
 # How to run the model
 
- (1) download the pretrained weights from https://pan.baidu.com/s/1gDryB10_WA1Mz6ZMcKVNkQ, passwd: y4eo. I give up Google Drive because it is super slow and I am really disappointed with it!!! Please unzip the weights into the "GOPRO" folder.
+ (1) download the pretrained weights from https://pan.baidu.com/s/1gDryB10_WA1Mz6ZMcKVNkQ, passwd: y4eo. I give up Google Drive because it is super slow and I am really disappointed with it!!! Please unzip the weights into the "GOPRO_GAN" folder.
 
  (2) [CUDA_VISIBLE_DEVICES=xxx] python3 main.py <input_folder> <output_folder> [mode]
 
