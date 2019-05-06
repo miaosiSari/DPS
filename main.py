@@ -28,17 +28,17 @@ sizeCropH = patchsize
 sizeCropW = patchsize
 colors = 3
 scale = 4
-decay_step = 5
+decay_step = 15
 decay_rate1 = 0.90
 decay_rate2 = 0.85
 learning_rate1=2e-5
 learning_rate2=5e-5
-batchsize = 12
-name = 'GOPRO'
+batchsize = 15
+name = 'GOPRO_GAN'
 path = name+'_log.txt'
 mode = 'test'
-l1_or_l2 = 'l2'
-max_epochs = 15
+l1_or_l2 = 'l1'
+max_epochs = 200
 now_epoch= 0
 step = 0
 pyfile = True
@@ -52,14 +52,12 @@ def Conv(name, x, filter_size, in_filters, out_filters, strides, padding, relu=0
     with tf.variable_scope(name):
         result = tf.layers.conv2d(x, out_filters, filter_size, (strides, strides), padding=padding, activation=None)
         if isinstance(relu, float):
-            #print(name, 'relu', relu)
             return leaky_relu(result, alpha=relu)
         else:
-            #print(name, 'nonrelu')
             return result
     
 
-def C(name, x, filter_size, in_filters, out_filters, strides, relu=True):
+def C(name, x, filter_size, in_filters, out_filters, strides, relu=False):
     x = Conv(name, x, filter_size, in_filters, out_filters, strides, 'SAME', relu=relu)
     return x
     
@@ -71,10 +69,8 @@ def Conv_transpose(name, x, filter_size, out_filters, fraction = 2, padding = "S
         return x
     
 def instance_norm(name, x):
-
     with tf.variable_scope(name):
         x = tf.contrib.layers.instance_norm(x)
-    
     return x
 
 
@@ -102,12 +98,9 @@ def res_block(name, x, n_feats):
     _res = x
     x = tf.pad(x, [[0,0],[1,1],[1,1],[0,0]], mode = 'REFLECT')
     x = Conv(name = name + 'conv1', x = x, filter_size = 3, in_filters = n_feats, out_filters = n_feats, strides = 1, padding = 'VALID')
-    #x = instance_norm(name = name + 'instance_norm1', x = x)
     x = leaky_relu(x)
-
     x = tf.pad(x, [[0,0],[1,1],[1,1],[0,0]], mode = 'REFLECT')
     x = Conv(name = name + 'conv2', x = x, filter_size = 3, in_filters = n_feats, out_filters = n_feats, strides = 1, padding = 'VALID')
-    #x = instance_norm(name = name + 'instance_norm2', x = x)
     x = x + _res 
     return x
 
@@ -224,13 +217,30 @@ class nets:
         return output_hr, scale2, deblur_feature, super_resolved, sharp
     
 
+class D:
+    @staticmethod
+    def dis(x, reuse=False, num=3):
+        with tf.variable_scope(name_or_scope='dis', reuse=reuse):
+            print(x.shape)
+            for cnt in range(num):
+                 if cnt == 3:
+                       inchannels = 3
+                 else:
+                       inchannels = 64
+                 x = C('dis_conv%s'%cnt, x, 3, inchannels, 64, 1, relu=0.2)
+            x = C('dis_conv%s'%num, x, 3, 64, 64, 1, relu=False)
+            x = tf.nn.sigmoid(x)
+            return x
+    
+    
 class assign:
     @staticmethod
     def get_deblur_var():
         trainablevars = tf.trainable_variables()
         deblurvars = [t for t in trainablevars if t.name.find('g_net')>=0]
-        nondeblurvars = [t for t in trainablevars if t.name.find('g_net')<0]
-        return deblurvars, nondeblurvars, trainablevars
+        nondeblurvars = [t for t in trainablevars if t.name.find('g_net')<0 and t.name.find('dis')<0]
+        disvars = [t for t in trainablevars if t.name.find('g_net')<0 and t.name.find('dis') >= 0]
+        return deblurvars, nondeblurvars, trainablevars, disvars
         
     @staticmethod
     def get_assign_dict(deblurvars, pkl_path,printall=True):
@@ -304,11 +314,14 @@ def preprocessing(prefix_dirty = 'SRA/', prefix_sharp = 'SRB/', prefix_half='tra
     return dirtyarray, sharparray, halfarray, finalarray, overflow
 
 
+def count2():
+    return np.sum([np.prod(v.get_shape().as_list()) for v in tf.trainable_variables()])
+
 batchcursor = 0
 if mode == 'train':
-     with open('info.json') as f:
-          d = list(json.load(f))
-     random.shuffle(d)
+    with open('info.json') as f:
+        d = list(json.load(f))
+    random.shuffle(d)
 initial_globalstep = 0
 globalstep = tf.Variable(initial_globalstep, trainable=False)
 blurred = tf.placeholder(tf.float32, [None, None, None, 3])
@@ -330,8 +343,21 @@ else:
     loss2 = tf.reduce_mean(tf.square(scale2-scale2_imgs))
     loss3 = tf.reduce_mean(tf.square(final-scale4_imgs))
 print("loss")
-deblurvars, nondeblurvars, trainablevars = assign.get_deblur_var()
-G_loss = lambda1*loss1+lambda2*loss2+lambda3*loss3
+content_loss = lambda1*loss1+lambda2*loss2+lambda3*loss3
+
+real_prob = D.dis(scale4_imgs, reuse = False)
+fake_prob = D.dis(final, reuse = True)
+epsilon = tf.random_uniform(shape = [batchsize, 1, 1, 1], minval = 0.0, maxval = 1.0)
+interpolated_input = epsilon * scale4_imgs + (1 - epsilon)*final
+gradient = tf.gradients(D.dis(interpolated_input, reuse = True), [interpolated_input])[0]
+GP_loss = tf.reduce_mean(tf.square(tf.sqrt(tf.reduce_mean(tf.square(gradient), axis= [1, 2, 3])) - 1))
+d_loss_real = - tf.reduce_mean(real_prob)
+d_loss_fake = tf.reduce_mean(fake_prob)
+G_loss = -d_loss_fake + 100.0*content_loss
+D_loss = d_loss_real + d_loss_fake + 10.0 * GP_loss
+
+deblurvars, nondeblurvars, trainablevars, disvars = assign.get_deblur_var()
+
 original_optimizer1 = tf.train.AdamOptimizer(learning_rate = lr1)
 optimizer1 = tf.contrib.estimator.clip_gradients_by_norm(original_optimizer1, clip_norm=5.0)
 G_train1 = optimizer1.minimize(G_loss,global_step=globalstep, var_list=deblurvars)
@@ -339,6 +365,11 @@ original_optimizer2 = tf.train.AdamOptimizer(learning_rate = lr2)
 optimizer2 = tf.contrib.estimator.clip_gradients_by_norm(original_optimizer2, clip_norm=5.0)
 G_train2 = optimizer2.minimize(G_loss,global_step=globalstep, var_list=nondeblurvars)
 G_train = tf.group(G_train1, G_train2)
+
+D_optimizer = tf.train.AdamOptimizer(learning_rate = lr1)
+optimizer = tf.contrib.estimator.clip_gradients_by_norm(D_optimizer, clip_norm=5.0)
+D_train = optimizer.minimize(D_loss,global_step=globalstep, var_list=disvars)
+
 PSNR = tf.reduce_mean(tf.image.psnr(final, scale4_imgs, max_val = 1.0))
 ssim = tf.reduce_mean(tf.image.ssim(final, scale4_imgs, max_val = 1.0))
 PSNR_deblur = tf.reduce_mean(tf.image.psnr(sharp, sharp_imgs, max_val = 1.0))
@@ -347,12 +378,13 @@ PSNR_blur = tf.reduce_mean(tf.image.psnr(blurred, sharp_imgs, max_val = 1.0))
 ssim_blur = tf.reduce_mean(tf.image.ssim(blurred, sharp_imgs, max_val = 1.0))
 PSNR_scale2 = tf.reduce_mean(tf.image.psnr(scale2, scale2_imgs, max_val = 1.0))
 ssim_scale2 = tf.reduce_mean(tf.image.ssim(scale2, scale2_imgs, max_val = 1.0))
-error = final-scale4_imgs
 print("assign")
 try:
-    if os.path.exists('weight.pkl'):
+    print(os.path.exists('weights.pkl'))
+    if os.path.exists('weights.pkl'):
          assign_dict = assign.get_assign_dict(deblurvars, 'weights.pkl')
 except:
+    print(traceback.format_exc())
     pass
 def tensor_to_img(tensor):
     tensor = tensor*255.0
@@ -456,6 +488,7 @@ with tf.Session() as sess:
                 sess.run(assign_dict[key])
             write("load_weights_successfully!", path)
             pass
+        print("mode=%s"%mode)
         if mode == 'test':
             try:
                  mode = sys.argv[3]
@@ -467,34 +500,19 @@ with tf.Session() as sess:
             saver.save(sess, "%s/deblur"%pathtomodel, global_step=globalstep)
             write("now_epoch=%s"%now_epoch, path)
             feed_lr1, feed_lr2 = assign.get_learning_rates(learning_rate1, learning_rate2, decay_step, decay_rate1, decay_rate2, now_epoch)
-            '''
-            The config set below is used to finetune on REDS
-            To train a REDS, please set:
-            '''
-
-            '''
             op = G_train
             if now_epoch < 40:
-                feed_lambda1, feed_lambda2, feed_lambda3 = 0.5, 2.0, 1.0
+                feed_lambda1, feed_lambda2, feed_lambda3 = 0.5, 5.0, 1.0
             else:
-                feed_lambda1, feed_lambda2, feed_lambda3 = 0.0, 1.0, 2.0
-            '''
-            if now_epoch < 8:
-                feed_lambda1, feed_lambda2, feed_lambda3 = 1000.0, 5.0, 2.0
-                op = G_train
-            elif now_epoch >= 8 and now_epoch <= 12:
-                op = G_train
-                feed_lambda1, feed_lambda2, feed_lambda3 = 2.0, 1000.0, 5.0
-            else:
-                op = G_train
-                feed_lambda1, feed_lambda2, feed_lambda3 = 2.0, 5.0, 1000.0
+                feed_lambda1, feed_lambda2, feed_lambda3 = 0.5, 1.0, 3.0
             overflow = False
             while not overflow:
                 dirtyarray, sharparray, halfarray, finalarray, overflow = preprocessing()
                 feed_dict = {lr1: feed_lr1, lr2: feed_lr2, blurred:dirtyarray, sharp_imgs: sharparray, scale2_imgs:halfarray, scale4_imgs:finalarray, lambda1:feed_lambda1, lambda2:feed_lambda2, lambda3:feed_lambda3}
-                if step % 100 == 0:
-                    _, run_G_loss, run_loss1, run_loss2, run_loss3, run_lambda1, run_lambda2, run_lambda3, run_PSNR, run_PSNR_deblur, run_PSNR_blur,run_PSNR_scale2, run_ssim, run_ssim_deblur, run_ssim_blur,run_ssim_scale2, g, run_lr1, run_lr2= sess.run([op, G_loss, loss1, loss2, loss3, lambda1, lambda2, lambda3, PSNR, PSNR_deblur, PSNR_blur,PSNR_scale2, ssim, ssim_deblur, ssim_blur, ssim_scale2, globalstep, lr1, lr2], feed_dict = feed_dict)
-                    write(get_time()+' '+str(g)+' update_G(%s epoch), G_loss=%s=%s*%s+%s*%s+%s*%s, PSNR=%s, %s(%s, %s), ssim=%s, %s(%s, %s), step=%s, batchcursor=%s, run_lr=[%s,%s]'%(now_epoch, run_G_loss, feed_lambda1, run_loss1, feed_lambda2, run_loss2, feed_lambda3, run_loss3, run_PSNR, run_PSNR_scale2, run_PSNR_deblur, run_PSNR_blur, run_ssim, run_ssim_scale2, run_ssim_deblur, run_ssim_blur, step, batchcursor, run_lr1, run_lr2), path)
+                if step % 120 == 0:
+                    sess.run(D_train, feed_dict=feed_dict)
+                    _, run_G_loss, run_D_loss, run_real, run_fake, run_loss1, run_loss2, run_loss3, run_lambda1, run_lambda2, run_lambda3, run_PSNR, run_PSNR_deblur, run_PSNR_blur,run_PSNR_scale2, run_ssim, run_ssim_deblur, run_ssim_blur,run_ssim_scale2, g, run_lr1, run_lr2= sess.run([op, G_loss, D_loss, d_loss_real, d_loss_fake, loss1, loss2, loss3, lambda1, lambda2, lambda3, PSNR, PSNR_deblur, PSNR_blur,PSNR_scale2, ssim, ssim_deblur, ssim_blur, ssim_scale2, globalstep, lr1, lr2], feed_dict = feed_dict)
+                    write(get_time()+' '+str(g)+' update_G(%s epoch), G_loss=%s, D_loss=%s, d_loss_real=%s, d_loss_fake=%s, %s*%s+%s*%s+%s*%s, PSNR=%s, %s(%s, %s), ssim=%s, %s(%s, %s), step=%s, batchcursor=%s, run_lr=[%s,%s]'%(now_epoch, run_G_loss, run_D_loss, run_real, run_fake, feed_lambda1, run_loss1, feed_lambda2, run_loss2, feed_lambda3, run_loss3, run_PSNR, run_PSNR_scale2, run_PSNR_deblur, run_PSNR_blur, run_ssim, run_ssim_scale2, run_ssim_deblur, run_ssim_blur, step, batchcursor, run_lr1, run_lr2), path)
                     flag = False
                     if run_G_loss < preloss:
                         preloss = run_G_loss
@@ -504,6 +522,7 @@ with tf.Session() as sess:
                         saver.save(sess, "%s/deblur"%pathtomodel, global_step=globalstep)
 
                 else:
+                    sess.run(D_train, feed_dict=feed_dict)
                     _ = sess.run(op, feed_dict=feed_dict)
                 if not pyfile and step%40 == 0:
                     _, run_gene_img, run_G_loss, run_PSNR, run_ssim, run_middle, run_sharp= sess.run([G_train, final, G_loss, PSNR, ssim, scale2, sharp], feed_dict = feed_dict)
@@ -530,6 +549,7 @@ with tf.Session() as sess:
                 step += 1
             now_epoch += 1 
     except:
+        print(traceback.format_exc())
         pass
 
 
